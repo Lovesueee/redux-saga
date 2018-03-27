@@ -21,6 +21,9 @@ const SET_CONTEXT = 'SET_CONTEXT'
 const TEST_HINT =
   '\n(HINT: if you are getting this errors in tests, consider using createMockTask from redux-saga/utils)'
 
+// effect description （对象)
+// [IO] 代表这是一个 effect
+// 其他就是 effect 类型 + 对应的参数
 const effect = (type, payload) => ({ [IO]: true, [type]: payload })
 
 export const detach = eff => {
@@ -63,6 +66,8 @@ export function put(channel, action) {
       check(channel, is.notUndef, 'put(action): argument action is undefined')
     }
   }
+  // 如果这是 put(action) 的话
+  // 进行参数转移
   if (is.undef(action)) {
     action = channel
     channel = null
@@ -85,10 +90,14 @@ export function race(effects) {
 }
 
 function getFnCallDesc(meth, fn, args) {
+  // meth 表示方法名，主要用于提示
   if (process.env.NODE_ENV === 'development') {
     check(fn, is.notUndef, `${meth}: argument fn is undefined`)
   }
 
+  // 一般来说 fn 应该是 一个 normal 函数，或是 generator function
+  // 这里说 还进行了在扩展，用户在传递具体参数时：
+  // fn 是数组，对象，字符串的情况，主要是为了额外传递一个 context （虽然一般都是null）
   let context = null
   if (is.array(fn)) {
     [context, fn] = fn
@@ -228,6 +237,7 @@ export const delay = call.bind(null, delayUtil)
 
 const createAsEffectType = type => effect => effect && effect[IO] && effect[type]
 
+// 返回每一个 effect type 附带的数据内容
 export const asEffect = {
   take: createAsEffectType(TAKE),
   put: createAsEffectType(PUT),

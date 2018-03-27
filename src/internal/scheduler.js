@@ -1,3 +1,5 @@
+// 任务队列
+// 这里主要是为了让任务按顺序，尽可能快的执行
 const queue = []
 /**
   Variable to hold a counting semaphore
@@ -6,6 +8,9 @@ const queue = []
   - Decrementing releases a lock. Zero locks puts the scheduler in a `released` state. This
     triggers flushing the queued tasks.
 **/
+// 信号量
+// 0: 表示：空闲，可以立马执行任务
+// >=1： 表示：挂起，任务压缩队列，等候执行
 let semaphore = 0
 
 /**
@@ -13,6 +18,8 @@ let semaphore = 0
   and flushed after this task has finished (assuming the scheduler endup in a released
   state).
 **/
+// 原子操作，只执行当前task
+// 用于嵌套的情况，详见 scheduler 的 test 用例
 function exec(task) {
   try {
     suspend()
@@ -26,8 +33,11 @@ function exec(task) {
   Executes or queues a task depending on the state of the scheduler (`suspended` or `released`)
 **/
 export function asap(task) {
+  // task 放入队列中
   queue.push(task)
 
+  // 当前队列处于空闲状态
+  // 执行任务
   if (!semaphore) {
     suspend()
     flush()
@@ -38,6 +48,8 @@ export function asap(task) {
   Puts the scheduler in a `suspended` state. Scheduled tasks will be queued until the
   scheduler is released.
 **/
+// 队列处于 暂停或挂起 状态
+// 用信号量控制
 export function suspend() {
   semaphore++
 }
@@ -45,6 +57,7 @@ export function suspend() {
 /**
   Puts the scheduler in a `released` state.
 **/
+// 队列处于 空闲状态
 function release() {
   semaphore--
 }

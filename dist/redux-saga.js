@@ -83,6 +83,9 @@ sym('TASK');
 var TASK_CANCEL =
 /*#__PURE__*/
 sym('TASK_CANCEL');
+var SAGA_LOCATION =
+/*#__PURE__*/
+sym('SAGA_LOCATION');
 
 var konst = function konst(v) {
   return function () {
@@ -156,7 +159,7 @@ var is = {
     return is.func(f) && hasOwn(f, 'toString');
   },
   symbol: function symbol(sym) {
-    return Boolean(sym) && typeof Symbol === "function" && sym.constructor === Symbol && sym !== Symbol.prototype;
+    return Boolean(sym) && typeof Symbol === 'function' && sym.constructor === Symbol && sym !== Symbol.prototype;
   },
   multicast: function multicast(ch) {
     return is.channel(ch) && ch[MULTICAST];
@@ -208,6 +211,7 @@ function deferred(props) {
   }
 
   var def = _extends({}, props);
+
   var promise = new Promise(function (resolve, reject) {
     def.resolve = resolve;
     def.reject = reject;
@@ -297,10 +301,13 @@ function makeIterator(next, thro, name) {
   }
 
   var iterator = {
-    name: name,
+    meta: {
+      name: name
+    },
     next: next,
     throw: thro,
-    return: kReturn
+    return: kReturn,
+    isSagaIterator: true
   };
 
   if (typeof Symbol !== 'undefined') {
@@ -478,8 +485,6 @@ var sliding = function sliding(limit) {
 var expanding = function expanding(initialSize) {
   return ringBuffer(initialSize, ON_OVERFLOW_EXPAND);
 };
-
-
 
 var buffers = Object.freeze({
 	none: none,
@@ -996,6 +1001,100 @@ if ("development" !== 'production' && typeof isCrushed.name === 'string' && isCr
   warning('You are currently using minified code outside of NODE_ENV === \'production\'. ' + 'This means that you are running a slower development build of Redux. ' + 'You can use loose-envify (https://github.com/zertosh/loose-envify) for browserify ' + 'or DefinePlugin for webpack (http://stackoverflow.com/questions/30030031) ' + 'to ensure you have the correct code for your production build.');
 }
 
+function formatLocation(fileName, lineNumber) {
+  return fileName + "?" + lineNumber;
+}
+
+function getLocation(instrumented) {
+  return instrumented[SAGA_LOCATION];
+}
+
+function effectLocationAsString(effect) {
+  var location = getLocation(effect);
+
+  if (location) {
+    var code = location.code,
+        fileName = location.fileName,
+        lineNumber = location.lineNumber;
+    var source = code + "  " + formatLocation(fileName, lineNumber);
+    return source;
+  }
+
+  return '';
+}
+
+function sagaLocationAsString(sagaMeta) {
+  var name = sagaMeta.name,
+      location = sagaMeta.location;
+
+  if (location) {
+    return name + "  " + formatLocation(location.fileName, location.lineNumber);
+  }
+
+  return name;
+}
+
+var flatMap = function flatMap(arr, getter) {
+  if (getter === void 0) {
+    getter = function getter(f) {
+      return f;
+    };
+  }
+
+  return arr.reduce(function (acc, i) {
+    return acc.concat(getter(i));
+  }, []);
+};
+
+function cancelledTasksAsString(sagaStack) {
+  var cancelledTasks = flatMap(sagaStack, function (i) {
+    return i.cancelledTasks;
+  });
+
+  if (!cancelledTasks.length) {
+    return '';
+  }
+
+  return ['Tasks cancelled due to error:'].concat(cancelledTasks).join('\n');
+}
+/**
+    @param {saga, effect}[] sagaStack
+    @returns {string}
+
+    @example
+    The above error occurred in task errorInPutSaga {pathToFile}
+    when executing effect put({type: 'REDUCER_ACTION_ERROR_IN_PUT'}) {pathToFile}
+        created by fetchSaga {pathToFile}
+        created by rootSaga {pathToFile}
+*/
+
+
+function sagaStackToString(sagaStack) {
+  var firstSaga = sagaStack[0],
+      otherSagas = sagaStack.slice(1);
+  var crashedEffectLocation = firstSaga.effect ? effectLocationAsString(firstSaga.effect) : null;
+  var errorMessage = "The above error occurred in task " + sagaLocationAsString(firstSaga.meta) + (crashedEffectLocation ? " \n when executing effect " + crashedEffectLocation : '');
+  return [errorMessage].concat(otherSagas.map(function (s) {
+    return "    created by " + sagaLocationAsString(s.meta);
+  }), [cancelledTasksAsString(sagaStack)]).join('\n');
+}
+function addSagaStack(errorObject, errorStack) {
+  if (typeof errorObject === 'object') {
+    if (typeof errorObject.sagaStack === 'undefined') {
+      // property is used as a stack of descriptors for failed sagas
+      // after formatting to string it will be re-written
+      // to pass sagaStack as a string in user land
+      Object.defineProperty(errorObject, 'sagaStack', {
+        value: [],
+        writable: true,
+        enumerable: false
+      });
+    }
+
+    errorObject.sagaStack.push(errorStack);
+  }
+}
+
 var done = {
   done: true,
   value: undefined
@@ -1124,6 +1223,39 @@ function takeLatest$1(patternOrChannel, worker) {
       return ['q1', yFork(action), setTask];
     }
   }, 'q1', "takeLatest(" + safeName(patternOrChannel) + ", " + worker.name + ")");
+}
+
+function takeLeading$1(patternOrChannel, worker) {
+  for (var _len = arguments.length, args = new Array(_len > 2 ? _len - 2 : 0), _key = 2; _key < _len; _key++) {
+    args[_key - 2] = arguments[_key];
+  }
+
+  var yTake = {
+    done: false,
+    value: take(patternOrChannel)
+  };
+
+  var yCall = function yCall(ac) {
+    return {
+      done: false,
+      value: call.apply(void 0, [worker].concat(args, [ac]))
+    };
+  };
+
+  var action;
+
+  var setAction = function setAction(ac) {
+    return action = ac;
+  };
+
+  return fsmIterator({
+    q1: function q1() {
+      return ['q2', yTake, setAction];
+    },
+    q2: function q2() {
+      return action === END ? [qEnd] : ['q1', yCall(action)];
+    }
+  }, 'q1', "takeLeading(" + safeName(patternOrChannel) + ", " + worker.name + ")");
 }
 
 function throttle$1(delayLength, pattern, worker) {
@@ -1469,9 +1601,16 @@ function takeLatest(patternOrChannel, worker) {
 
   return fork.apply(void 0, [takeLatest$1, patternOrChannel, worker].concat(args));
 }
+function takeLeading(patternOrChannel, worker) {
+  for (var _len10 = arguments.length, args = new Array(_len10 > 2 ? _len10 - 2 : 0), _key10 = 2; _key10 < _len10; _key10++) {
+    args[_key10 - 2] = arguments[_key10];
+  }
+
+  return fork.apply(void 0, [takeLeading$1, patternOrChannel, worker].concat(args));
+}
 function throttle(ms, pattern, worker) {
-  for (var _len10 = arguments.length, args = new Array(_len10 > 3 ? _len10 - 3 : 0), _key10 = 3; _key10 < _len10; _key10++) {
-    args[_key10 - 3] = arguments[_key10];
+  for (var _len11 = arguments.length, args = new Array(_len11 > 3 ? _len11 - 3 : 0), _key11 = 3; _key11 < _len11; _key11++) {
+    args[_key11 - 3] = arguments[_key11];
   }
 
   return fork.apply(void 0, [throttle$1, ms, pattern, worker].concat(args));
@@ -1534,9 +1673,26 @@ var asEffect = {
   createAsEffectType(SET_CONTEXT)
 };
 
+function getMetaInfo(fn) {
+  return {
+    name: fn.name || 'anonymous',
+    location: getLocation(fn)
+  };
+}
+
+function getIteratorMetaInfo(iterator, fn) {
+  if (iterator.isSagaIterator) {
+    return {
+      name: iterator.meta.name
+    };
+  }
+
+  return getMetaInfo(fn);
+} // TODO: check if this hacky toString stuff is needed
 // also check again whats the difference between CHANNEL_END and CHANNEL_END_TYPE
 // maybe this could become MAYBE_END
 // I guess this gets exported so takeMaybe result can be checked
+
 
 var CHANNEL_END$1 = {
   toString: function toString() {
@@ -1564,13 +1720,24 @@ var TASK_CANCEL$1 = {
   - If it completes, the return value is the one returned by the main task
 **/
 
-function forkQueue(name, mainTask, cb) {
+function forkQueue(mainTask, onAbort, cb) {
   var tasks = [],
       result,
       completed = false;
   addTask(mainTask);
 
+  var getTasks = function getTasks() {
+    return tasks;
+  };
+
+  var getTaskNames = function getTaskNames() {
+    return tasks.map(function (t) {
+      return t.meta.name;
+    });
+  };
+
   function abort(err) {
+    onAbort();
     cancelAll();
     cb(err, true);
   }
@@ -1619,14 +1786,8 @@ function forkQueue(name, mainTask, cb) {
     addTask: addTask,
     cancelAll: cancelAll,
     abort: abort,
-    getTasks: function getTasks() {
-      return tasks;
-    },
-    taskNames: function taskNames() {
-      return tasks.map(function (t) {
-        return t.name;
-      });
-    }
+    getTasks: getTasks,
+    getTaskNames: getTaskNames
   };
 }
 
@@ -1682,7 +1843,7 @@ function createTaskIterator(_ref) {
   }());
 }
 
-function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, options, parentEffectId, name, cont) {
+function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, options, parentEffectId, meta, cont) {
   if (dispatch === void 0) {
     dispatch = noop;
   }
@@ -1703,17 +1864,24 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
     parentEffectId = 0;
   }
 
-  if (name === void 0) {
-    name = 'anonymous';
-  }
-
   var _options = options,
       sagaMonitor = _options.sagaMonitor,
       logger = _options.logger,
       onError = _options.onError,
       middleware = _options.middleware;
   var log$$1 = logger || log;
+
+  var logError = function logError(err) {
+    log$$1('error', err);
+
+    if (err.sagaStack) {
+      log$$1('error', err.sagaStack);
+    }
+  };
+
   var taskContext = Object.create(parentContext);
+  var crashedEffect = null;
+  var cancelledDueToErrorTasks = [];
   /**
     Tracks the current effect cancellation
     Each time the generator progresses. calling runEffect will set a new value
@@ -1726,13 +1894,15 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
     to track the main flow (besides other forked tasks)
   **/
 
-  var task = newTask(parentEffectId, name, iterator, cont);
+  var task = newTask(parentEffectId, meta, iterator, cont);
   var mainTask = {
-    name: name,
+    meta: meta,
     cancel: cancelMain,
     isRunning: true
   };
-  var taskQueue = forkQueue(name, mainTask, end);
+  var taskQueue = forkQueue(mainTask, function onAbort() {
+    cancelledDueToErrorTasks.push.apply(cancelledDueToErrorTasks, taskQueue.getTaskNames());
+  }, end);
   /**
     cancellation of the main task. We'll simply resume the Generator with a Cancel
   **/
@@ -1839,7 +2009,7 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
       }
     } catch (error) {
       if (mainTask.isCancelled) {
-        log$$1('error', error);
+        logError(error);
       }
 
       mainTask.isMainRunning = false;
@@ -1854,12 +2024,22 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
       iterator._result = result;
       iterator._deferredEnd && iterator._deferredEnd.resolve(result);
     } else {
+      addSagaStack(result, {
+        meta: meta,
+        effect: crashedEffect,
+        cancelledTasks: cancelledDueToErrorTasks
+      });
+
       if (!task.cont) {
+        if (result.sagaStack) {
+          result.sagaStack = sagaStackToString(result.sagaStack);
+        }
+
         if (result instanceof Error && onError) {
           onError(result);
         } else {
           // TODO: could we skip this when _deferredEnd is attached?
-          log$$1('error', result);
+          logError(result);
         }
       }
 
@@ -1875,11 +2055,7 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
     task.joiners = null;
   }
 
-  function runEffect(effect, effectId, label, currCb) {
-    if (label === void 0) {
-      label = '';
-    }
-
+  function runEffect(effect, effectId, currCb) {
     /**
       each effect runner must attach its own logic of cancellation to the provided callback
       it allows this generator to propagate cancellation downward.
@@ -1895,7 +2071,7 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
     var data; // prettier-ignore
 
     return (// Non declarative effect
-      is.promise(effect) ? resolvePromise(effect, currCb) : is.iterator(effect) ? resolveIterator(effect, effectId, name, currCb) // declarative effects
+      is.promise(effect) ? resolvePromise(effect, currCb) : is.iterator(effect) ? resolveIterator(effect, effectId, meta, currCb) // declarative effects
       : (data = asEffect.take(effect)) ? runTakeEffect(data, currCb) : (data = asEffect.put(effect)) ? runPutEffect(data, currCb) : (data = asEffect.all(effect)) ? runAllEffect(data, effectId, currCb) : (data = asEffect.race(effect)) ? runRaceEffect(data, effectId, currCb) : (data = asEffect.call(effect)) ? runCallEffect(data, effectId, currCb) : (data = asEffect.cps(effect)) ? runCPSEffect(data, currCb) : (data = asEffect.fork(effect)) ? runForkEffect(data, effectId, currCb) : (data = asEffect.join(effect)) ? runJoinEffect(data, currCb) : (data = asEffect.cancel(effect)) ? runCancelEffect(data, currCb) : (data = asEffect.select(effect)) ? runSelectEffect(data, currCb) : (data = asEffect.actionChannel(effect)) ? runChannelEffect(data, currCb) : (data = asEffect.flush(effect)) ? runFlushEffect(data, currCb) : (data = asEffect.cancelled(effect)) ? runCancelledEffect(data, currCb) : (data = asEffect.getContext(effect)) ? runGetContextEffect(data, currCb) : (data = asEffect.setContext(effect)) ? runSetContextEffect(data, currCb) :
       /* anything else returned as is */
       currCb(effect)
@@ -1934,6 +2110,10 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
         isErr ? sagaMonitor.effectRejected(effectId, res) : sagaMonitor.effectResolved(effectId, res);
       }
 
+      if (isErr) {
+        crashedEffect = effect;
+      }
+
       cb(res, isErr);
     } // tracks down the current cancel
 
@@ -1956,7 +2136,7 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
       try {
         currCb.cancel();
       } catch (err) {
-        log$$1('error', err);
+        logError(err);
       }
 
       currCb.cancel = noop; // defensive measure
@@ -1970,12 +2150,12 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
 
     if (is.func(middleware)) {
       middleware(function (eff) {
-        return runEffect(eff, effectId, label, currCb);
+        return runEffect(eff, effectId, currCb);
       })(effect);
       return;
     }
 
-    runEffect(effect, effectId, label, currCb);
+    runEffect(effect, effectId, currCb);
   }
 
   function resolvePromise(promise, cb) {
@@ -1994,8 +2174,8 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
     });
   }
 
-  function resolveIterator(iterator, effectId, name, cb) {
-    proc(iterator, stdChannel$$1, dispatch, getState, taskContext, options, effectId, name, cb);
+  function resolveIterator(iterator, effectId, meta, cb) {
+    proc(iterator, stdChannel$$1, dispatch, getState, taskContext, options, effectId, meta, cb);
   }
 
   function runTakeEffect(_ref2, cb) {
@@ -2044,9 +2224,6 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
       try {
         result = (channel$$1 ? channel$$1.put : dispatch)(action);
       } catch (error) {
-        log$$1('error', error); // TODO: should such error here be passed to `onError`?
-        // or is it already if we dropped error swallowing
-
         cb(error, true);
         return;
       }
@@ -2073,7 +2250,7 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
       return;
     }
 
-    return is.promise(result) ? resolvePromise(result, cb) : is.iterator(result) ? resolveIterator(result, effectId, fn.name, cb) : cb(result);
+    return is.promise(result) ? resolvePromise(result, cb) : is.iterator(result) ? resolveIterator(result, effectId, getMetaInfo(fn), cb) : cb(result);
   }
 
   function runCPSEffect(_ref5, cb) {
@@ -2112,11 +2289,12 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
       fn: fn,
       args: args
     });
+    var meta = getIteratorMetaInfo(taskIterator, fn);
 
     try {
       suspend();
 
-      var _task = proc(taskIterator, stdChannel$$1, dispatch, getState, taskContext, options, effectId, fn.name, detached ? null : noop);
+      var _task = proc(taskIterator, stdChannel$$1, dispatch, getState, taskContext, options, effectId, meta, detached ? null : noop);
 
       if (detached) {
         cb(_task);
@@ -2318,11 +2496,11 @@ function proc(iterator, stdChannel$$1, dispatch, getState, parentContext, option
     cb();
   }
 
-  function newTask(id, name, iterator, cont) {
+  function newTask(id, meta, iterator, cont) {
     var _ref9;
 
     iterator._deferredEnd = null;
-    return _ref9 = {}, _ref9[TASK] = true, _ref9.id = id, _ref9.name = name, _ref9.toPromise = function toPromise() {
+    return _ref9 = {}, _ref9[TASK] = true, _ref9.id = id, _ref9.meta = meta, _ref9.toPromise = function toPromise() {
       if (iterator._deferredEnd) {
         return iterator._deferredEnd.promise;
       }
@@ -2420,7 +2598,7 @@ function runSaga(options, saga) {
     logger: logger,
     onError: onError,
     middleware: middleware
-  }, effectId, saga.name);
+  }, effectId, getMetaInfo(saga));
 
   if (sagaMonitor) {
     sagaMonitor.effectResolved(effectId, task);
@@ -2428,6 +2606,8 @@ function runSaga(options, saga) {
 
   return task;
 }
+
+// 似乎这里在创建 sagaMiddle 的时候可以进行一定的配置
 
 function sagaMiddlewareFactory(_ref) {
   if (_ref === void 0) {
@@ -2438,10 +2618,11 @@ function sagaMiddlewareFactory(_ref) {
       _ref2$context = _ref2.context,
       context = _ref2$context === void 0 ? {} : _ref2$context,
       options = _objectWithoutProperties(_ref2, ["context"]);
+
   var sagaMonitor = options.sagaMonitor,
       logger = options.logger,
       onError = options.onError,
-      effectMiddlewares = options.effectMiddlewares;
+      effectMiddlewares = options.effectMiddlewares; // 开发环境，做一些 options 字段类型校验，很稳！！
 
   {
     if (is.notUndef(logger)) {
@@ -2455,13 +2636,17 @@ function sagaMiddlewareFactory(_ref) {
     if (is.notUndef(options.emitter)) {
       check(options.emitter, is.func, 'options.emitter passed to the Saga middleware is not a function!');
     }
-  }
+  } // 真正的 saga middleware
+  // 接收来自 redux 的形参对象 { getState, dispatch }
+
 
   function sagaMiddleware(_ref3) {
     var getState = _ref3.getState,
         dispatch = _ref3.dispatch;
     var channel$$1 = stdChannel();
-    channel$$1.put = (options.emitter || identity)(channel$$1.put);
+    channel$$1.put = (options.emitter || identity)(channel$$1.put); // redux applyMiddle 配置中间件时，
+    // 会重新赋值 run 方法。
+
     sagaMiddleware.run = runSaga.bind(null, {
       context: context,
       channel: channel$$1,
@@ -2474,9 +2659,11 @@ function sagaMiddlewareFactory(_ref) {
     });
     return function (next) {
       return function (action) {
+        // 我猜：主要用于 saga 监控吧？配置项，用于development环境下
         if (sagaMonitor && sagaMonitor.actionDispatched) {
           sagaMonitor.actionDispatched(action);
-        }
+        } // 直接执行reducer，拿到
+
 
         var result = next(action); // hit reducers
 
@@ -2484,7 +2671,9 @@ function sagaMiddlewareFactory(_ref) {
         return result;
       };
     };
-  }
+  } // 这里是提醒，用户在使用 sagaMiddleware.run(...) 的时候，确保 redux-saga 中间件 已经被挂在在 redux 上。
+  // 如果挂在了的话，sagaMiddleware.run 就会被重写（详见上面）
+
 
   sagaMiddleware.run = function () {
     throw new Error('Before running a Saga, you must mount the Saga middleware on the Store using applyMiddleware');
@@ -2525,6 +2714,7 @@ var effects = Object.freeze({
 	setContext: setContext,
 	takeEvery: takeEvery,
 	takeLatest: takeLatest,
+	takeLeading: takeLeading,
 	throttle: throttle,
 	delay: delay$1
 });
@@ -2556,6 +2746,7 @@ exports.channel = channel;
 exports.multicastChannel = multicastChannel;
 exports.stdChannel = stdChannel;
 exports.CANCEL = CANCEL;
+exports.SAGA_LOCATION = SAGA_LOCATION;
 exports.detach = detach;
 
 Object.defineProperty(exports, '__esModule', { value: true });

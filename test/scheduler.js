@@ -5,13 +5,13 @@ test('scheduler executes all recursively triggered tasks in order', assert => {
   const actual = []
   assert.plan(1)
   asap(() => {
-    actual.push('1')
     asap(() => {
       actual.push('2')
     })
     asap(() => {
       actual.push('3')
     })
+    actual.push('1')
   })
   assert.deepEqual(actual, ['1', '2', '3'])
   assert.end()

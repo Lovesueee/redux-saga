@@ -153,15 +153,19 @@ export function multicastChannel() {
   }
 
   // TODO: check if its possible to extract closing function and reuse it in both unicasts and multicasts
+  // 关闭 channel (通道)
   const close = () => {
+    // 标记
     closed = true
+    // 获取最新的 takers (监听者)
     const takers = (currentTakers = nextTakers)
 
     for (let i = 0; i < takers.length; i++) {
       const taker = takers[i]
-      taker(END)
+      taker(END) // 发送 END 消息 (action)
     }
 
+    // 清空 takers
     nextTakers = []
   }
 
@@ -174,50 +178,73 @@ export function multicastChannel() {
         check(input, is.notUndef, UNDEFINED_INPUT_ERROR)
       }
 
+      // 如果 channel 已关闭，put 是没有任何效果的
       if (closed) {
         return
       }
-
+      // 如果这个消息是 end 消息 (内部消息)
+      // 那么关闭该 channel
       if (isEnd(input)) {
         close()
         return
       }
-
+      // 获取最新的 takers
       const takers = (currentTakers = nextTakers)
       for (let i = 0; i < takers.length; i++) {
         const taker = takers[i]
+        // 匹配的话，执行回调（执行一次，就 cancel 删除掉）
+        // 有点像 `任务` 的感觉，做完 就删除。
         if (taker[MATCH](input)) {
-          taker.cancel()
+          taker.cancel() //
           taker(input)
         }
       }
     },
     take(cb, matcher = matchers.wildcard) {
+      // 如果 channel 已关闭，那么注册的回调执行 with END
       if (closed) {
         cb(END)
         return
       }
+      // 默认 matcher: wildcard
+      // 永远返回 true (任意匹配, *)
+      // 这里有个 matcher，是为了匹配指定的 action，执行对应的回调（可多个）
       cb[MATCH] = matcher
+      // 注册和取消 不应该在 currentListeners 引用上直接进行
+      // 防止影响正在执行的回调函数
+      // 场景：回调函数里，有执行take 或 cancel 方法
       ensureCanMutateNextTakers()
       nextTakers.push(cb)
-
+      // 取消监听的方式，是绑定在回调函数上的
+      // 这种好处在于，用户不需要再传递 cb 参数！！还是挺不错的~
+      // once: 只调用一次
+      // take effect 向 next 提供 cancel 方法
       cb.cancel = once(() => {
         ensureCanMutateNextTakers()
+        // 内部数组 splice 删除
         remove(nextTakers, cb)
       })
     },
-    close,
+    close, // close 函数单独现在上面，没看太明白，有啥意图？！
   }
 }
 
 export function stdChannel() {
   const chan = multicastChannel()
   const { put } = chan
+  // hight order function
+  // 重写 input 方法
   chan.put = input => {
+    // 内部的 saga action
+    // 非用户自定义的 action
+    // yield put(action);
     if (input[SAGA_ACTION]) {
       put(input)
       return
     }
+    // as soon as possible?
+    // dispatch(action);
+    // 尽可能快的额执行 put 操作
     asap(() => put(input))
   }
   return chan
